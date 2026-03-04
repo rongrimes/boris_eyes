@@ -77,23 +77,23 @@ async def main():
 #   setup tasks
     await asyncio.gather(heart_beat(led_onboard), boris_eyes())
 
-if __name__ == "__main__":
+#if __name__ == "__main__":
 #   Initialize global pins
-    led_onboard = machine.Pin("LED", machine.Pin.OUT)
+led_onboard = machine.Pin("LED", machine.Pin.OUT)
 
-    for i in range(3): 
-        left_e[i] = machine.Pin(left_p[i], machine.Pin.OUT)
-        rite_e[i] = machine.Pin(rite_p[i], machine.Pin.OUT)
+for i in range(3): 
+    left_e[i] = machine.Pin(left_p[i], machine.Pin.OUT)
+    rite_e[i] = machine.Pin(rite_p[i], machine.Pin.OUT)
 
 #   run tasks
-    try:
-        asyncio.run(main())
+try:
+    asyncio.run(main())
 
-    except KeyboardInterrupt:
+except KeyboardInterrupt:
 #       turn off lights
-        led_onboard.off()
-        for i in range(3): 
-            left_e[i].off()
-            rite_e[i].off()
+    led_onboard.off()
+    for i in range(3): 
+        left_e[i].off()
+        rite_e[i].off()
 
-        print("Byebye from boris-eyes!")
+    print("Byebye from boris-eyes!")
