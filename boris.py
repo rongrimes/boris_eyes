@@ -6,6 +6,7 @@ import utime
 
 from boris.microdot import Microdot
 
+IP_PORT = 5000
 app = Microdot()
 
 # make global to turn off later.
@@ -217,7 +218,7 @@ async def main():
         heart_beat(led_onboard),
         boris_eyes(),
         clock(),
-        app.start_server(port=80),
+        app.start_server(port=IP_PORT),
     )
 
 # --- wifi (must be connected before the server starts) ---
