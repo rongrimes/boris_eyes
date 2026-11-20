@@ -2,7 +2,11 @@
 import asyncio
 import machine
 import network
-import utime
+import ntptime
+import time
+
+ET_OFFSET = -5   # EDT; use -4
+#                # EST; use -5
 
 from boris.microdot import Microdot
 
@@ -226,10 +230,10 @@ def wifi_connect(ssid, password, hostname):
     network.hostname(hostname)
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
+#   ssid += "ZZ"                         # make it fail, to test when getting time
     wlan.connect(ssid, password)
     # wait for connection (simple blocking version, fine at startup)
-    import time
-    for _ in range(20):
+    for _ in range(10):
         if wlan.isconnected():
             break
         print(".", end="")
@@ -237,12 +241,29 @@ def wifi_connect(ssid, password, hostname):
     print()
     print(wlan.ifconfig())
 
+def get_time():
+    ntptime.timeout = 2
+    try:
+        ntptime.settime()          # sets the RTC to UTC
+    except OSError:
+        print("OSError. time retrieval abandoned")
+        return 0
+    offset = ET_OFFSET * 3600   # EDT; use -4
+                                # EST; use -5
+    t = time.localtime(time.time() + offset)
+    return t
+
 # ---------------------------------------------------------------------
 # Start here
 
 import boris.secrets as secrets
 wifi_connect(ssid=secrets.WIFI_SSID, password=secrets.WIFI_PASSWORD,
              hostname='Boris')
+
+boris_time = get_time()
+print(f"Boris time: {boris_time}")
+
+# We'll use the time in a later update when we set hours for the Awake/Asleep activities
 
 #if __name__ == "__main__":
 #   Initialize global pins
