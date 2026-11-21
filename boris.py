@@ -1,13 +1,13 @@
 
 import asyncio
 import machine
-import network
 import ntptime
 import time
 
 ET_OFFSET = -5   # EDT; use -4
 #                # EST; use -5
 
+from boris.wifi_sup import wifi_connect
 from boris.microdot import Microdot
 
 IP_PORT = 5000
@@ -35,7 +35,6 @@ blinks = 4
 
 # Global settings - changed only by the microdot web interface.
 # Hence (hoping) no critical update zone to set up.
-
 
 # (key, label, type, min, max, step)
 FIELDS = [
@@ -155,9 +154,16 @@ async def clock():
     global boris_awake
     while True:
         boris_awake = True
-        await asyncio.sleep(settings['boris_awake_time'] * 60)
+        for mins in range(settings['boris_awake_time']):
+            await asyncio.sleep(60)
+            if mins >= settings['boris_awake_time']:  # this may happen if the value is reduced globally
+                break
+            
         boris_awake = False
-        await asyncio.sleep(settings['boris_asleep_time'] * 60)  # units are mins
+        for mins in range(settings['boris_asleep_time']):
+            await asyncio.sleep(60)
+            if mins >= settings['boris_asleep_time']:  # this may happen if the value is reduced globally
+                break
 
 async def heart_beat(led_onboard):
     ''' simply flashes the pi pico status light to show the board/program are alive'''
@@ -218,6 +224,10 @@ async def boris_eyes():
 async def main():
 #   setup tasks
 #   await asyncio.gather(heart_beat(led_onboard), boris_eyes(), clock())
+    import boris.secrets as secrets
+    await wifi_connect(ssid=secrets.WIFI_SSID, password=secrets.WIFI_PASSWORD,
+                 hostname='Boris')
+
     await asyncio.gather(
         heart_beat(led_onboard),
         boris_eyes(),
@@ -225,44 +235,33 @@ async def main():
         app.start_server(port=IP_PORT),
     )
 
-# --- wifi (must be connected before the server starts) ---
-def wifi_connect(ssid, password, hostname):
-    network.hostname(hostname)
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-#   ssid += "ZZ"                         # make it fail, to test when getting time
-    wlan.connect(ssid, password)
-    # wait for connection (simple blocking version, fine at startup)
-    for _ in range(10):
-        if wlan.isconnected():
-            break
-        print(".", end="")
-        time.sleep(1)
-    print()
-    print(wlan.ifconfig())
-
-def get_time():
-    ntptime.timeout = 2
-    try:
-        ntptime.settime()          # sets the RTC to UTC
-    except OSError:
-        print("OSError. time retrieval abandoned")
-        return 0
-    offset = ET_OFFSET * 3600   # EDT; use -4
-                                # EST; use -5
-    t = time.localtime(time.time() + offset)
-    return t
+# def get_time():
+#     ntptime.timeout = 2
+#     try:
+#         ntptime.settime()          # sets the RTC to UTC
+#     except OSError:
+#         print("OSError. time retrieval abandoned")
+#         return (0, 0, 0, 0, 0, 0, 0, 0)       # 8-tuple to match a real time
+#     offset = ET_OFFSET * 3600   # EDT; use -4
+#                                 # EST; use -5
+#     t = time.localtime(time.time() + offset)
+#     return t     # 8-tuple
 
 # ---------------------------------------------------------------------
 # Start here
 
-import boris.secrets as secrets
-wifi_connect(ssid=secrets.WIFI_SSID, password=secrets.WIFI_PASSWORD,
-             hostname='Boris')
+# --- wifi (must be connected before the server starts) ---
+#import boris.secrets as secrets
+#wifi_connect(ssid=secrets.WIFI_SSID, password=secrets.WIFI_PASSWORD,
+#            hostname='Boris')
 
-boris_time = get_time()
-print(f"Boris time: {boris_time}")
-
+# boris_time = get_time()
+# print(f"Boris time: {boris_time}")
+# hh = boris_time[3]
+# mm = boris_time[4]
+# ss = boris_time[5]
+# print(hh, mm, ss)
+# 
 # We'll use the time in a later update when we set hours for the Awake/Asleep activities
 
 #if __name__ == "__main__":
