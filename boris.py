@@ -8,7 +8,7 @@ ET_OFFSET = -5   # EDT; use -4
 #                # EST; use -5
 
 from boris.wifi_sup import wifi_connect
-from boris.microdot import Microdot
+from boris.microdot import Microdot, send_file
 
 IP_PORT = 5000
 app = Microdot()
@@ -19,14 +19,18 @@ led_onboard = None
 ON  = 1
 OFF = 0
 
-# Time to run the eyes in boris awake mode a,d boris asleep mode
-# typically display period is 24 hours (in minutes)
+# Initial times to run the eyes in boris awake mode and boris asleep mode.
+# Typically display period is 24 hours (in minutes)
 # units = minutes
 boris_awake_time  = 5 * 60   # (mins) 24 hours
 boris_asleep_time = 19 * 60    # (mins) 5 hours
-#test values
-#boris_awake_time = 4  # 4 minutes
-#boris_awake_time = 2     # 2 minutes
+
+# start off with boris in awake mode
+boris_awake = True
+
+# Counting mins in clock - global to display/export them
+awk_mins  = 0
+aslp_mins = 0
 
 blink_step = 0.10
 blink_pause = 0.8
@@ -37,15 +41,26 @@ blinks = 4
 # Hence (hoping) no critical update zone to set up.
 
 # (key, label, type, min, max, step)
-FIELDS = [
-    ('boris_awake_time',  'Boris awake time (mins)',   int,   1,   5 * 60, 1),
-    ('boris_asleep_time', 'Boris asleep time (mins)',  int,   0,  19 * 60, 1),
-    ('blinks',         'Blink-alerts/cycle',        int,   0,  10,  1),
-    ('betw_blinks_awakes',     'Betwn blinks-alerts (s)',    int,   0,  20, 1),
-    ('blink_step',     'Blink/Alert step (s)',    float, 0,  1.0,   0.1),
-    ('blink_pause',    'Blink/Alert wait (s)',   float, 0,  1.0,   0.1),
+
+FIELDS_floats  = [
+    ('blink_step',        'Blink/Alert step (s)',    float, 0,  1.0,   0.1),
+    ('blink_pause',       'Blink/Alert wait (s)',    float, 0,  2.0,   0.1),
 ]
-FIELD = {f[0]: f for f in FIELDS}
+
+FIELDS_intvars = [
+    ('boris_awake_time',  'Boris awake time (mins)',   int,   1,  1440, 1),
+    ('boris_asleep_time', 'Boris asleep time (mins)',  int,   0,  1440, 1),
+    ('blinks',            'Blink-alerts/cycle',        int,   0,  10,   1),
+    ('betw_blinks_awakes','Betwn blinks-alerts (s)',   int,   0,  20,   1),
+]
+FIELDS_cntrs = [
+    ('awk_mins',  'Awake  mins cntr', "awk"), 
+    ('aslp_mins', 'Asleep mins cntr', "aslp")
+]
+
+# Collect the fields cming back from a web browser to validate against.
+FIELD = {f[0]: f for f in FIELDS_floats}  | \
+        {f[0]: f for f in FIELDS_intvars}
 
 # start from your existing values (float() makes sure the real ones stay real)
 settings = {
@@ -55,6 +70,8 @@ settings = {
     'blink_pause':           float(blink_pause),
     'betw_blinks_awakes':    betw_blinks_awakes,
     'blinks':                blinks,
+    'awk_mins':              awk_mins,
+    'aslp_mins':             aslp_mins,   
 }
 
 #--------------------------------------------------------------------------
@@ -62,16 +79,21 @@ settings = {
 #function show(k, v) { document.getElementById('v_' + k).textContent = v; }
 
 HEAD = """<!doctype html>
-<html><head><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Boris</title></head><body><h3>Boris</h3>"""
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boris</title>
+</head><body><h3>Boris</h3>"""
 
 TAIL = """<div style="width:400px;">
 <p>
 <b>Awake:</b> Eyes are on, with brief blinks.<br/>
-<b>Asleep:</b> Eyes are off, with brief alerts (open).<br/>
-<b>Cycle:</b> One session of Boris Awake or Asleep.<p/>
-<b>Boris awake time:</b>&nbsp; Period of equal Awake and Asleep times.<br/>
-<b>Boris asleep time:</b> Period of Asleep cycle only.<br/>
+<b>Asleep:</b> Eyes are off, with brief alerts (open).</p>
+<p>
+<b>Boris awake time:</b>&nbsp; Full period of alternating Awake and<br/>
+&nbsp;&nbsp;&nbsp;Asleep cycles.<br/>
+<b>Boris asleep time:</b> Full period of Asleep cycle only.<br/>
+<b>Cycle:</b> One session of Boris Awake or Asleep.</p>
 <p>
 The goal for Awake/Asleep time is to span 24 hours. Typically, 5 hours for
 Awake time (after turn on), followed by 19 hours of Asleep time, where the eyes only
@@ -80,36 +102,70 @@ non-peak times.
 </p>
 </div>
 <script>
+let timer = null;
+let failures = 0;
+const MAX_FAILURES = 3;
+
 function show(k, v) { document.getElementById('v_' + k).textContent = v; }
 function setv(k, v) {
   fetch('/set/' + k + '/' + v, {method: 'POST'})
     .then(r => r.text())
     .then(t => { if (t !== 'ok') alert(k + ': ' + t); });
 }
+    async function update() {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 3000);   // give up on a hung request after 3 s
+        const r = await fetch("/status", { cache: "no-store", signal: ctrl.signal } );
+        clearTimeout(t);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+ 
+        failures = 0;
+        document.getElementById("state").textContent = d.state ? "awake" : "asleep"; 
+        document.getElementById("awk").textContent = d.awk;
+        document.getElementById("aslp").textContent = d.aslp;
+      } catch (e) {
+        failures++;
+        console.error("update failed:", e);
+        if (failures >= MAX_FAILURES) {
+          clearInterval(timer);
+          document.getElementById("state").textContent = "OFFLINE (reload to retry)";
+        }
+      }
+    }
+
+    update();                    // fill in values immediately on load
+    timer = setInterval(update, 10000);  // then every 10 seconds
 </script></body></html>"""
 
 def build_page():
     rows = ''
-    for key, label, typ, lo, hi, step in FIELDS:
+    for key, label, typ, lo, hi, step in FIELDS_intvars:
         v = settings[key]
-        if typ is float:
-            ctl = ('<input type="range" min="%s" max="%s" step="%s" value="%s" '
-                   'style="width:200px" oninput="show(\'%s\',this.value)" '
-                   'onchange="setv(\'%s\',this.value)">') % (lo, hi, step, v, key, key)
-            rows += '<p><span style="display: inline-block; width:150px;">%s:</span> <b id="v_%s">%s</b>&nbsp;&nbsp;%s</p>' \
-                    % (label, key, v, ctl)
-        else:
-            ctl = ('<input type="number" min="%s" max="%s" step="%s" value="%s" ' + \
-                   'style="text-align: right;" ' + \
-                    'onchange="setv(\'%s\',this.value)">') % (lo, hi, step, v, key)
-            rows += '<p><span style="display: inline-block; width:200px;">%s:</span> %s</p>' \
-                    % (label, ctl)
-#       rows += '<p>%s: <b id="v_%s">%s</b><br>%s</p>' % (label, key, v, ctl)
-    return HEAD + rows + TAIL
+        ctl = ('<input type="number" min="%s" max="%s" step="%s" value="%s" ' + \
+               'style="text-align: right;" ' + \
+                'onchange="setv(\'%s\',this.value)">') % (lo, hi, step, v, key)
+        rows += '<p><span style="display: inline-block; width:200px;">%s:</span> %s</p>' \
+                % (label, ctl)
 
-#@app.route('/')
-# async def index(request):
-#     return 'Hello, world!'
+    for key, label, typ, lo, hi, step in FIELDS_floats:
+        v = settings[key]
+        ctl = ('<input type="range" min="%s" max="%s" step="%s" value="%s" '
+               'style="width:150px" oninput="show(\'%s\',this.value)" '
+               'onchange="setv(\'%s\',this.value)">') % (lo, hi, step, v, key, key)
+        rows += '<p><span style="display: inline-block; width:200px;">%s: &nbsp;<b id="v_%s">%s</b></span>%s</p>' \
+                % (label, key, v, ctl)
+
+    rows += '<p><span style="display: inline-block; width:200px;">Boris state:</span> ' + \
+            f'<b><span id="state">{boris_awake}</span></b></p>'
+
+    for key, label, id_key in FIELDS_cntrs:
+        v = settings[key]
+        rows += f'<p><span style="display: inline-block; width:200px;">{label}:</span> ' + \
+                f'<b><span id="{id_key}">-</span></b></p>'
+
+    return HEAD + rows + TAIL
 
 @app.get('/')
 async def index(request):
@@ -130,9 +186,20 @@ async def set_value(request, name, value):
     if not lo <= new <= hi:
         return 'out of range', 400
     settings[name] = new
-    print(f"name: {name}  // value: {new}")
+    print(f"{name}  // value: {new}")
     return 'ok'
 
+@app.route("/status")
+def status(request):
+    return {
+        'state': boris_awake,
+        'awk': settings['awk_mins'],
+        'aslp': settings['aslp_mins'],
+    }, 200, {'Cache-Control': 'no-store'}
+
+@app.route('/')
+def index(request):
+    return send_file('index.html')
 
 # pin assignments
 left_p = ["GP2", "GP1", "GP0"]
@@ -143,27 +210,36 @@ rite_p = ["GP28", "GP27", "GP26"]
 left_e = [None, None, None]
 rite_e = [None, None, None]
 
-# start off with boris in awake mode
-boris_awake = True
-
 #--------------------------------------------------------------------------
 
 async def clock():
     ''' clock() simply toggles the boris_awake variable, which is used to control
         which mode the eyes are in. '''
     global boris_awake
+    global settings
+    
+    # Note: Can't use a for loop here - we need to check the exit criteria against
+    #       a dynamic limit, and a for loop only ends with a static limit 
+
     while True:
         boris_awake = True
-        for mins in range(settings['boris_awake_time']):
-            await asyncio.sleep(60)
-            if mins >= settings['boris_awake_time']:  # this may happen if the value is reduced globally
+        settings['awk_mins'] = 0
+        while True:
+            if settings['awk_mins'] >= settings['boris_awake_time']:  # this may happen if the value is reduced globally
+                settings['awk_mins'] = 0
                 break
+            await asyncio.sleep(60)
+            settings['awk_mins'] += 1
             
         boris_awake = False
-        for mins in range(settings['boris_asleep_time']):
-            await asyncio.sleep(60)
-            if mins >= settings['boris_asleep_time']:  # this may happen if the value is reduced globally
+        settings['aslp_mins'] = 0
+#       for aslp_mins in range(settings['boris_asleep_time']):
+        while True:
+            if settings['aslp_mins'] >= settings['boris_asleep_time']:  # this may happen if the value is reduced globally
+                settings['aslp_mins'] = 0
                 break
+            await asyncio.sleep(60)
+            settings['aslp_mins'] += 1
 
 async def heart_beat(led_onboard):
     ''' simply flashes the pi pico status light to show the board/program are alive'''
@@ -221,20 +297,6 @@ async def boris_eyes():
             await blink_eyes_open(left_e, rite_e)
         await asyncio.sleep(settings['betw_blinks_awakes'])
 
-async def main():
-#   setup tasks
-#   await asyncio.gather(heart_beat(led_onboard), boris_eyes(), clock())
-    import boris.secrets as secrets
-    await wifi_connect(ssid=secrets.WIFI_SSID, password=secrets.WIFI_PASSWORD,
-                 hostname='Boris')
-
-    await asyncio.gather(
-        heart_beat(led_onboard),
-        boris_eyes(),
-        clock(),
-        app.start_server(port=IP_PORT),
-    )
-
 # def get_time():
 #     ntptime.timeout = 2
 #     try:
@@ -247,24 +309,32 @@ async def main():
 #     t = time.localtime(time.time() + offset)
 #     return t     # 8-tuple
 
+async def main():
+# --- wifi startup
+    import boris.secrets as secrets
+    await wifi_connect(ssid=secrets.WIFI_SSID, password=secrets.WIFI_PASSWORD,
+                 hostname='Boris')
+
+#   boris_time = get_time()
+#   print(f"Boris time: {boris_time}")
+#   hh = boris_time[3]
+#   mm = boris_time[4]
+#   ss = boris_time[5]
+#   print(hh, mm, ss)
+#
+#   We'll use the time in a later update when we set hours for the Awake/Asleep activities
+
+    await asyncio.gather(
+        heart_beat(led_onboard),
+        boris_eyes(),
+        clock(),
+        app.start_server(port=IP_PORT),
+    )
+
 # ---------------------------------------------------------------------
 # Start here
-
-# --- wifi (must be connected before the server starts) ---
-#import boris.secrets as secrets
-#wifi_connect(ssid=secrets.WIFI_SSID, password=secrets.WIFI_PASSWORD,
-#            hostname='Boris')
-
-# boris_time = get_time()
-# print(f"Boris time: {boris_time}")
-# hh = boris_time[3]
-# mm = boris_time[4]
-# ss = boris_time[5]
-# print(hh, mm, ss)
-# 
-# We'll use the time in a later update when we set hours for the Awake/Asleep activities
-
 #if __name__ == "__main__":
+
 #   Initialize global pins
 led_onboard = machine.Pin("LED", machine.Pin.OUT)
 
